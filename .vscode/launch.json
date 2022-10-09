@@ -9,7 +9,10 @@
             "type": "python",
             "request": "launch",
             "program": "./encode.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "env": {
+                "ENCODE_VIDEO_DIR": "file:/Users/jono/Developer/background_vt_encode/test_files"
+            }
         }
     ]
 }

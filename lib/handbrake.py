@@ -15,7 +15,7 @@ logging.basicConfig(level=logging.DEBUG)
 
 
 QUALITY = 50
-X265_QUALITY = 23
+X265_QUALITY = 22
 AUDIO_BITRATE = 48
 
 
@@ -29,11 +29,17 @@ async def run(*args: str, **kwargs: str):
     ]
 
     log.debug('HandBrakeCLI %s', shlex.join(run_args))
-    async with proc.run('HandBrakeCLI', *run_args, nice=10) as _:
-        pass
+    try:
+        async with proc.run('HandBrakeCLI', *run_args, nice=10) as hb_proc:
+            if 'pid_file' in kwargs:
+                with open(kwargs['pid_file'], 'w') as f:
+                    f.write(str(hb_proc.pid))
+    finally:
+        if 'pid_file' in kwargs:
+            os.remove(kwargs['pid_file'])
 
 
-async def encode(source_file: str, out_dir: str):
+async def encode(source_file: str, out_dir: str, pid_file: str):
 
     source_file_size = os.path.getsize(source_file)
     
@@ -58,7 +64,7 @@ async def encode(source_file: str, out_dir: str):
     # encoder
     video_stream = metadata.video_stream
     assert video_stream
-    encoder = 'vt_h265_10bit' if video_stream.is_hdr else 'vt_h265'
+    encoder = 'x265_10bit' # if video_stream.is_hdr else 'x265'
 
     # audio
     audio_streams = metadata.audio_streams
@@ -87,28 +93,20 @@ async def encode(source_file: str, out_dir: str):
         '--aencoder': 'opus',
         '--ab': ','.join(map(str, audio_bitrates)),
         '--mixdown': '7point1',
-        '--quality': str(QUALITY),
+        '--quality': str(X265_QUALITY),
     }
 
-    await run(*base_args, **base_kwargs)
+    await run(*base_args, **base_kwargs, pid_file=pid_file)
 
     new_file_size = os.path.getsize(dest_file)
     if new_file_size > source_file_size:
-        log.info('File too big, will use x265')
+        log.info('File too big, will use target bitrate')
         
-        base_kwargs['--quality'] = str(X265_QUALITY)
-        base_kwargs['--encoder'] = 'x265_10bit' if video_stream.is_hdr else 'x265'
-        await run(*base_args, **base_kwargs)
-
-        new_file_size = os.path.getsize(dest_file)
-        if new_file_size > source_file_size:
-            log.info('Still too big, will use target bitrate')
-
-            del base_kwargs['--quality']
-            target_bitrate = floor((source_file_size * 8 / metadata.video_duration / 1000 - sum(audio_bitrates)) / 100) * 100 - 100
-            base_kwargs['--vb'] = str(target_bitrate)
-            base_args.append('--two-pass')
-            await run(*base_args, **base_kwargs)
+        del base_kwargs['--quality']
+        target_bitrate = floor((source_file_size * 8 / metadata.video_duration / 1000 - sum(audio_bitrates)) / 100) * 100 - 100
+        base_kwargs['--vb'] = str(target_bitrate)
+        base_args.append('--two-pass')
+        await run(*base_args, **base_kwargs, pid_file=pid_file)
 
     return dest_file
 
@@ -116,5 +114,6 @@ async def encode(source_file: str, out_dir: str):
 if __name__ == '__main__':
     asyncio.run(encode(
         '/Users/jono/Developer/background_vt_encode/tmp/download/The Green Planet - S01E03 - Seasonal Worlds.mkv',
-        '/tmp'
+        '/tmp',
+        '/tmp/hb_test.pid'
     ))

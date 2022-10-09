@@ -40,6 +40,10 @@ ENCODER_WHITELIST = [
 VIDEO_EXTENSIONS = ['mkv', 'mp4', 'avi', 'mov', 'ts', 'm4v']
 TARGET_CODEC = 'hevc'
 
+RUN_DIR = '/tmp/com.hillnz.background_encode'
+PID_FILE = os.path.join(RUN_DIR, 'encode.pid')
+HB_PID_FILE = os.path.join(RUN_DIR, 'handbrake.pid')
+
 THIS_DIR = os.path.abspath(os.path.dirname(os.path.realpath(__file__)))
 TMP_DIR = os.path.join(THIS_DIR, 'tmp')
 log.info(f'TMP_DIR: {TMP_DIR}')
@@ -117,6 +121,8 @@ async def list(jobs: Jobs):
             job = EncodeJob()
             job.extension = os.path.splitext(p)[1][1:]
             job.remote_path = p
+            filename = os.path.basename(job.remote_path)
+            job.output_path = os.path.join(OUTPUT_DIR or os.path.dirname(job.remote_path), splitext(filename)[0] + '.mkv')
             yield job, True
 
 
@@ -124,78 +130,88 @@ probe_lock = Lock()
 async def probe_format(jobs: Jobs):
     async for job in jobs:
         async with probe_lock:
+
             if not job.remote_path:
                 yield job, False
                 continue
-
-            if read_done(job):
-                log.info('probe: %s - skipping due to done.log', basename(job.remote_path))
-                encode = False
-                yield job, False
-                continue
-
-            # bind a port to get a random free one
-            with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
-                s.bind(('', 0))
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                port = s.getsockname()[1]
-
-                addr = f'127.0.0.1:{port}'
-                job.http_server = await rclone.serve_http(job.remote_path, addr)
-                local_path = job.local_path = f'http://{addr}/{quote_url(os.path.basename(job.remote_path))}'
-                log.info('serve_http: %s', job.local_path)
-
-            try:
-                # Wait for server to be up
-                success = False
-                async with aiohttp.ClientSession() as session:
-                    for _ in range(5):
-                        log.info('serve_http: awaiting %s', local_path)
-                        try:
-                            async with session.head(local_path) as resp:
-                                if resp.status == 200:
-                                    success = True
-                                    break
-                        except aiohttp.ClientConnectorError:
-                            pass
-                        await asyncio.sleep(2)
-                if not success:
-                    raise Exception(f'serve_http: {local_path} failed')        
-
-                job.format = await probe(job.local_path)
-                video_stream = next(( s for s in job.format.streams if s.codec_type == 'video' ), None)
-                codec = video_stream.codec_name if video_stream else None
-                if job.format.format.tags:
-                    encoder = job.format.format.tags.encoder or 'unknown'
-                else:
-                    encoder = 'unknown'
-                log.info('probe_format: %s - codec %s encoder %s', 
-                    basename(job.local_path), 
-                    codec,
-                    encoder)
-
-                if job.format.format.bit_rate < 400000:
-                    log.info('probe_format: %s - skipping due to very low bitrate', basename(job.local_path))
-                    write_done(job)
-                    yield job, False
-                    continue
-
-                encode = False
-                if not any(encoder.startswith(e) for e in ENCODER_WHITELIST):
-                    encode = True
-                if codec != TARGET_CODEC:
-                    encode = True
-
-                os.makedirs(TMP_DIR, exist_ok=True)
+            
+            encode = True
+            for remote_path in [job.remote_path, job.output_path]:
                 if not encode:
-                    write_done(job)
-                    log.info('probe_format: %s - skipping', basename(job.local_path))
+                    break
 
-            finally:
-                job.http_server.kill()
-                job.http_server = None
+                assert remote_path
+                
+                if read_done(job):
+                    log.info('probe: %s - skipping due to done.log', basename(remote_path))
+                    encode = False
+                    break
 
+                # bind a port to get a random free one
+                with closing(socket.socket(socket.AF_INET, socket.SOCK_STREAM)) as s:
+                    s.bind(('', 0))
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    port = s.getsockname()[1]
+
+                    addr = f'127.0.0.1:{port}'
+                    job.http_server = await rclone.serve_http(remote_path, addr)
+                    local_path = job.local_path = f'http://{addr}/{quote_url(os.path.basename(remote_path))}'
+                    log.info('serve_http: %s', job.local_path)
+
+                try:
+                    # Wait for server to be up
+                    success = False
+                    async with aiohttp.ClientSession() as session:
+                        for _ in range(5):
+                            log.info('serve_http: awaiting %s', local_path)
+                            try:
+                                async with session.head(local_path) as resp:
+                                    if resp.status == 200:
+                                        success = True
+                                        break
+                            except aiohttp.ClientConnectorError:
+                                pass
+                            await asyncio.sleep(2)
+                    if not success:
+                        if remote_path == job.output_path:
+                            break
+                        raise Exception(f'serve_http: {local_path} failed')        
+
+                    job.format = await probe(job.local_path)
+                    video_stream = next(( s for s in job.format.streams if s.codec_type == 'video' ), None)
+                    codec = video_stream.codec_name if video_stream else None
+                    if job.format.format.tags:
+                        encoder = job.format.format.tags.encoder or 'unknown'
+                    else:
+                        encoder = 'unknown'
+                    log.info('probe_format: %s - codec %s encoder %s', 
+                        basename(job.local_path), 
+                        codec,
+                        encoder)
+
+                    if job.format.format.bit_rate < 400000:
+                        log.info('probe_format: %s - skipping due to very low bitrate', basename(job.local_path))
+                        write_done(job)
+                        encode = False
+                        continue
+
+                    if any(encoder.startswith(e) for e in ENCODER_WHITELIST) and codec == TARGET_CODEC:
+                        encode = False
+
+                    os.makedirs(TMP_DIR, exist_ok=True)
+                    if not encode:
+                        write_done(job)
+                        log.info('probe_format: %s - skipping', basename(job.local_path))
+
+                finally:
+                    job.http_server.kill()
+                    job.http_server = None
+
+                if job.output_path == job.remote_path:
+                    break
+            
             yield job, encode
+
 
 
 download_lock = Lock()
@@ -236,7 +252,7 @@ async def transcode(jobs: Jobs):
 
             if TRANSCODER == 'handbrake':
                 log.info('transcode with handbrake: %s', basename(job.local_path))
-                job.output_path = await handbrake.encode(job.local_path, output_dir)
+                job.output_path = await handbrake.encode(job.local_path, output_dir, HB_PID_FILE)
             else:
                 log.info('noop transcode: %s', basename(job.local_path))
                 job.output_path = await noop_transcode(job.local_path, output_dir)
@@ -254,22 +270,16 @@ async def upload(jobs: Jobs):
                 continue
 
             original_dir = os.path.dirname(job.remote_path)
-            original_name = os.path.basename(job.remote_path)
             new_name = os.path.basename(job.output_path)
             new_path = os.path.join(OUTPUT_DIR or original_dir, new_name)
             tmp_path = new_path + '.tmp'
 
             log.info('upload: %s to %s', basename(job.output_path), new_path)
-            # TODO horrible hack
-            if new_path.startswith('jotta:'):
-                await rclone.copy(job.output_path, new_path)
-            else:
-                await rclone.copy(job.output_path, tmp_path)
-                await rclone.move(tmp_path, new_path)
-
-            if original_name != new_name:
-                log.info('upload: delete %s', original_name)
-                await rclone.delete(job.remote_path)
+            await rclone.copy(job.output_path, tmp_path)
+            log.info('delete: %s to %s', basename(job.remote_path))
+            await rclone.delete(job.remote_path)
+            log.info('move: %s to %s', basename(tmp_path), basename(new_path))
+            await rclone.move(tmp_path, new_path)
 
             write_done(job)
             yield job, True
@@ -297,25 +307,45 @@ async def cleanup(jobs: Jobs):
 
 async def start():
     """Start (or resume) encoding"""
-    
-    # TODO handle already running
-    
-    steps = [
-        list, 
-        probe_format,
-        download,
-        transcode,
-        upload,
-        cleanup,
-    ]
-    
-    jobs: List[EncodeJob] = []
-    for ext in VIDEO_EXTENSIONS:
-        job = EncodeJob()
-        job.extension = ext
-        jobs.append(job)
 
-    [ _ async for _ in pipeline(*steps, initial_value=jobs, finally_=cleanup, buffer_size=BUFFER_SIZE) ]
+    try:
+        existing_pid = int(open(PID_FILE).read())
+        # if process is running, exit
+        try:
+            os.kill(existing_pid, 0)
+            log.error('already running, exiting')
+            return
+        except ProcessLookupError:
+            pass
+    except FileNotFoundError:
+        pass
+
+    try:
+        os.makedirs(RUN_DIR, exist_ok=True)
+        with open(PID_FILE, 'w') as f:
+            f.write(str(os.getpid()))
+
+
+        steps = [
+            list, 
+            probe_format,
+            download,
+            transcode,
+            upload,
+            cleanup,
+        ]
+        
+        jobs: List[EncodeJob] = []
+        for ext in VIDEO_EXTENSIONS:
+            job = EncodeJob()
+            job.extension = ext
+            jobs.append(job)
+
+        [ _ async for _ in pipeline(*steps, initial_value=jobs, finally_=cleanup, buffer_size=BUFFER_SIZE) ]
+
+    finally:
+        if os.path.exists(PID_FILE):
+            os.remove(PID_FILE)
 
 
 async def main():

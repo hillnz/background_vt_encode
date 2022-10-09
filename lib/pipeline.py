@@ -1,6 +1,9 @@
-from asyncio import Queue, QueueEmpty, Task
 import asyncio
+import logging
+from asyncio import Queue, QueueEmpty, Task
 from typing import AsyncIterable, Callable, Iterable, Set, TypeVar
+
+log = logging.getLogger(__name__)
 
 
 T = TypeVar('T')
@@ -12,6 +15,9 @@ async def pipeline(*steps: JobStep[T], initial_value: Iterable[T], finally_: Job
 
     async def yield_from_queue(queue: JobQueue[T]) -> AsyncIterable[T]:
         while item := await queue.get():
+            if item is None:
+                queue.task_done()
+                break
             yield item
             queue.task_done()
 
@@ -21,6 +27,7 @@ async def pipeline(*steps: JobStep[T], initial_value: Iterable[T], finally_: Job
                 await out_queue.put(job)
             else:
                 await final_queue.put(job)
+        await out_queue.put(None)
             
     async def feed_queue(queue: JobQueue[T], jobs: Iterable[T]):
         for job in jobs:
@@ -52,7 +59,7 @@ async def pipeline(*steps: JobStep[T], initial_value: Iterable[T], finally_: Job
     pending.add(asyncio.create_task(run_step(finally_, final_in_queue, final_out_queue, None)))
 
     # Final step's results
-    queue_task = asyncio.create_task(in_queue.get())
+    queue_task = asyncio.create_task(final_out_queue.get())
     pending.add(queue_task)
 
     try:
@@ -65,11 +72,16 @@ async def pipeline(*steps: JobStep[T], initial_value: Iterable[T], finally_: Job
                     result = await queue_task
                     if result is not None:
                         yield result
-                        queue_task = asyncio.create_task(in_queue.get())
+                        queue_task = asyncio.create_task(final_out_queue.get())
                         pending.add(queue_task)
                 else:
                     await task
-    except:
+            
+            # for queue in queues:
+                
+
+
+    finally:
         # Cancel all tasks
         for task in pending:
             task.cancel()
@@ -84,6 +96,3 @@ async def pipeline(*steps: JobStep[T], initial_value: Iterable[T], finally_: Job
                 except QueueEmpty:
                     pass
         [ _ async for _ in finally_(remaining_jobs()) ]
-                
-        raise
-
