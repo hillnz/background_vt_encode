@@ -276,7 +276,7 @@ async def upload(jobs: Jobs):
 
             log.info('upload: %s to %s', basename(job.output_path), new_path)
             await rclone.copy(job.output_path, tmp_path)
-            log.info('delete: %s to %s', basename(job.remote_path))
+            log.info('delete: %s', basename(job.remote_path))
             await rclone.delete(job.remote_path)
             log.info('move: %s to %s', basename(tmp_path), basename(new_path))
             await rclone.move(tmp_path, new_path)
