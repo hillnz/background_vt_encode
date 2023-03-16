@@ -53,7 +53,7 @@ jobs:
           tags: "${{ env.DOCKER_REPO }}:${{ steps.set_version.outputs.VERSION }}"
 
       - name: Update repo description
-        uses: peter-evans/dockerhub-description@v2
+        uses: peter-evans/dockerhub-description@v3
         if: ${{ github.ref == 'refs/heads/main' }}
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
